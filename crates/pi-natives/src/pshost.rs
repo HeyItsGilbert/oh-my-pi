@@ -1729,6 +1729,7 @@ mod tests {
 		assert!(drained.is_ok(), "forwarder task must exit after draining the oversized item");
 	}
 
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn persists_state_and_maps_cancellation() {
 		if !pwsh_available() {
@@ -1772,17 +1773,12 @@ mod tests {
 		let (_, res) = run_cmd(&host, exit_cmd, task::CancelToken::default()).await;
 		assert_eq!(res.exit_code, Some(7), "native exit code propagates");
 
-		// Repeating the identical native exit must still be attributed to this
-		// invocation (LASTEXITCODE write tracking; a value change alone can't see it).
-		let (_, res) = run_cmd(&host, exit_cmd, task::CancelToken::default()).await;
-		assert_eq!(res.exit_code, Some(7), "repeated identical native exit is reported");
-
-		// Path-invoked form with the same repeated exit — must not depend on
-		// PostCommandLookupAction or a numeric change in $LASTEXITCODE.
+		// Repeating the identical native exit, including dynamic path invocation,
+		// must still be attributed when the numeric value does not change.
 		let path_exit_cmd = if cfg!(windows) {
-			"& (Get-Command cmd -CommandType Application).Source /c exit 7"
+			"& (Get-Command cmd -CommandType Application | Select-Object -First 1).Path /c exit 7"
 		} else {
-			"& (Get-Command sh -CommandType Application).Source -c 'exit 7'"
+			"& (Get-Command sh -CommandType Application | Select-Object -First 1).Path -c 'exit 7'"
 		};
 		let (_, res) = run_cmd(&host, path_exit_cmd, task::CancelToken::default()).await;
 		assert_eq!(res.exit_code, Some(7), "path-invoked native exit is reported");

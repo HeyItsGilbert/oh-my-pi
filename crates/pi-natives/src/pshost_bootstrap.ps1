@@ -196,15 +196,24 @@ function Format-AnsiText([string] $Text, [string] $Sgr) {
 # Emit one non-empty stream block as chunk frames, normalizing a trailing
 # newline so merged stream blocks stay visually separated downstream. Large
 # blocks are split so a single frame can never exceed the reader's cap (which
-# would tear down the host): 4M chars stays well under $MaxFrameBytes even
-# after UTF-8 expansion and JSON escaping.
+# would tear down the host): 4M UTF-16 code units stays well under
+# $MaxFrameBytes even after UTF-8 expansion and JSON escaping.
 function Write-Chunk([int] $Id, [string] $Stream, [string] $Text) {
     if (-not $Text) { return }
     if (-not $Text.EndsWith("`n")) { $Text += $NL }
     $sliceChars = 4194304
-    for ($offset = 0; $offset -lt $Text.Length; $offset += $sliceChars) {
+    $offset = 0
+    while ($offset -lt $Text.Length) {
         $len = [Math]::Min($sliceChars, $Text.Length - $offset)
+        # Substring counts UTF-16 code units. Keep a non-BMP scalar in one
+        # frame instead of splitting its surrogate pair into two invalid strings.
+        if ($offset + $len -lt $Text.Length -and
+            [char]::IsHighSurrogate($Text[$offset + $len - 1]) -and
+            [char]::IsLowSurrogate($Text[$offset + $len])) {
+            $len--
+        }
         Write-Frame @{ type = 'chunk'; id = $Id; stream = $Stream; text = $Text.Substring($offset, $len) }
+        $offset += $len
     }
 }
 
@@ -222,21 +231,13 @@ function Invoke-OnRunspace([string] $Script, [object[]] $Arguments) {
 
 # Initialize the object-retention store inside the shared runspace.
 #
-# Per-invocation exit attribution must NOT depend on $LASTEXITCODE changing
-# value. Path-invoked Applications and ExternalScripts that exit with the same
-# code as the previous native leave $LASTEXITCODE numerically unchanged, and
-# some of those invocations never fire PostCommandLookupAction — a
-# value-change fallback alone would then leave __ompExit null and report a
-# successful PowerShell-only run. A Write breakpoint on $LASTEXITCODE fires on
-# every assignment PowerShell itself performs for a native/external-script
-# pipeline (including same-code repeats) without ever resetting the variable,
-# so user commands still read the true persisted value. The value-change OR
-# below remains only as a belt-and-suspenders for the first write of a session
-# (unset → N), which some hosts do not surface through the breakpoint.
-# Start-Process / Process.Start do not write $LASTEXITCODE, so they do not
-# trip this flag. Get-Command / availability probes also do not write it, so
-# a lookup-only command after a failed native still stays clean (pinned by
-# the TS suite).
+# Per-invocation exit attribution must not depend on $LASTEXITCODE changing
+# value. Path-invoked applications and external scripts that exit with the
+# same code as the previous native leave $LASTEXITCODE numerically unchanged,
+# and some invocations never fire PostCommandLookupAction. A pre-lookup hook
+# catches path invocations before resolution; the post-lookup hook classifies
+# ordinary commands from PowerShell's resolved CommandInfo. Neither hook sees
+# a user assignment to $LASTEXITCODE as command execution.
 [void](Invoke-OnRunspace @'
 $global:__omp = [ordered]@{}
 $global:__omp.Last    = $null
@@ -245,15 +246,20 @@ $global:__omp.History = [ordered]@{}
 $ProgressPreference   = 'SilentlyContinue'
 $ErrorActionPreference = 'Continue'
 $global:__ompNativeRan = $false
-# Best-effort: if breakpoints are disabled in this host, attribution falls
-# back to the value-change OR in Start-Exec's finally (same-code path-invoked
-# repeats may then be missed — acceptable degradation, not a hard failure).
-try {
-    $null = Set-PSBreakpoint -Variable LASTEXITCODE -Mode Write -Action {
+$ExecutionContext.InvokeCommand.PreCommandLookupAction = {
+    param($sender, $event)
+    if ($event.CommandName -match '^(?:[A-Za-z]:)?[\\/]') {
         $global:__ompNativeRan = $true
     }
-} catch {
-    # ignored — value-change fallback still covers first/changed exits
+}
+$ExecutionContext.InvokeCommand.PostCommandLookupAction = {
+    param($sender, $event)
+    if ($event.Command.CommandType -in @(
+        [System.Management.Automation.CommandTypes]::Application,
+        [System.Management.Automation.CommandTypes]::ExternalScript
+    )) {
+        $global:__ompNativeRan = $true
+    }
 }
 '@)
 
@@ -360,13 +366,11 @@ function Start-Exec([pscustomobject] $Request) {
     # scope, keeping `$x = 1` in the user command persisted into the next
     # call. $LASTEXITCODE is never written by the wrapper, so user commands
     # always read the true persisted value; this invocation's native exit is
-    # attributed via the $LASTEXITCODE Write breakpoint flag (set on every
-    # native/external-script assignment, including same-code repeats) or an
-    # observed value change (covers the first write of a session) inside a
-    # finally, so it is recorded even when the command throws, calls exit,
-    # returns, or the pipeline is stopped. $commandBody sits alone on its own
-    # line so a trailing line-comment cannot swallow the `} finally {` that
-    # follows.
+    # attributed by the command-lookup hooks (including same-code path
+    # repeats) inside a finally, so it is recorded even when the command
+    # throws, calls exit, returns, or the pipeline is stopped. $commandBody
+    # sits alone on its own line so a trailing line-comment cannot swallow the
+    # `} finally {` that follows.
     #
     # See Test-HasTopLevelReturn above: most commands splice directly (fast
     # path, unchanged since introduction); a command with a bare top-level
@@ -383,7 +387,7 @@ if (`$__ompCwd) {
 try {
 $commandBody
 } finally {
-if ((`$global:__ompNativeRan -or `$global:LASTEXITCODE -ne `$global:__ompPrevExit) -and `$null -ne `$global:LASTEXITCODE) {
+if (`$global:__ompNativeRan -and `$null -ne `$global:LASTEXITCODE) {
     `$global:__ompExit = [int]`$global:LASTEXITCODE
 }
 }
