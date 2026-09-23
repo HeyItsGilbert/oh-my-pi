@@ -269,6 +269,8 @@ export interface ShellRendererConfig<TArgs> {
 	resolveCwd?: (args: TArgs | undefined) => string | undefined;
 	resolveEnv?: (args: TArgs | undefined) => Record<string, unknown> | undefined;
 	showHeader?: boolean;
+	commandLanguage?: string;
+	commandPrefix?: string;
 }
 
 function getPartialJson<TArgs>(args: TArgs | undefined): string | undefined {
@@ -294,19 +296,27 @@ export function getBashEnvForDisplay(args: BashRenderArgs): Record<string, unkno
  * reset SGR state at line boundaries, which made the previous single-string
  * `theme.fg("dim", ...)` form render only the first line as dim.
  */
-export function formatBashCommandLines(args: BashRenderArgs, uiTheme: Theme): string[] {
+export function formatBashCommandLines(
+	args: BashRenderArgs,
+	uiTheme: Theme,
+	config: Pick<ShellRendererConfig<unknown>, "commandLanguage" | "commandPrefix"> = {},
+): string[] {
 	const command = replaceTabs(sanitizeText(args.command || "…"));
-	const prefix = bashCommandPrefix(args, uiTheme);
-	const highlightedLines = highlightCode(command, "bash");
+	const prefix = bashCommandPrefix(args, uiTheme, config);
+	const highlightedLines = highlightCode(command, config.commandLanguage ?? "bash");
 	if (highlightedLines.length === 0) return [prefix.trimEnd()];
 	return highlightedLines.map((line, i) => (i === 0 ? `${prefix}${line}` : line));
 }
 
 /** The dim `$ cd <dir> && NAME="…" ` prefix ahead of a command's first line (trailing space included). */
-export function bashCommandPrefix(args: BashRenderArgs, uiTheme: Theme): string {
+export function bashCommandPrefix(
+	args: BashRenderArgs,
+	uiTheme: Theme,
+	config: Pick<ShellRendererConfig<unknown>, "commandPrefix"> = {},
+): string {
 	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
-	const prefixParts = ["$"];
+	const prefixParts = [config.commandPrefix ?? "$"];
 	if (displayWorkdir) prefixParts.push(cdPrefix(displayWorkdir, args.cdSeparator));
 	if (envAssignments) prefixParts.push(envAssignments);
 	return uiTheme.fg("dim", `${prefixParts.join(" ")} `);
@@ -484,9 +494,10 @@ function visualCommandLines(
 	details: BashToolDetails | undefined,
 	uiTheme: Theme,
 	width: number,
+	config: Pick<ShellRendererConfig<unknown>, "commandPrefix"> = {},
 ): string[] {
 	const scriptArgs = executedScriptArgs(args, details);
-	const prefix = bashCommandPrefix(scriptArgs, uiTheme);
+	const prefix = bashCommandPrefix(scriptArgs, uiTheme, config);
 	const hasContext =
 		!!formatToolWorkingDirectory(scriptArgs.cwd, getProjectDir()) ||
 		!!formatBashEnvAssignments(getBashEnvForDisplay(scriptArgs));
@@ -513,8 +524,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			return framedToolCard(uiTheme, ({ contentWidth }) => {
 				const presentation = options.shellPresentation;
 				cmdLines = presentation
-					? visualCommandLines(presentation, renderArgs, undefined, uiTheme, contentWidth)
-					: (cmdLines ?? formatBashCommandLines(renderArgs, uiTheme));
+					? visualCommandLines(presentation, renderArgs, undefined, uiTheme, contentWidth, config)
+					: (cmdLines ?? formatBashCommandLines(renderArgs, uiTheme, config));
 				const header =
 					config.showHeader === false
 						? undefined
@@ -717,9 +728,10 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 												details,
 												uiTheme,
 												contentWidth,
+												config,
 											)
 										: args
-											? (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme))
+											? (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme, config))
 											: [],
 									uiTheme,
 									{ expanded },
