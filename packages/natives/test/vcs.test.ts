@@ -128,9 +128,7 @@ describe("in-process VCS bindings", () => {
 			await vcsGitClone("https://10.255.255.1/never.git", target, { timeoutMs: 60_000 }, controller.signal);
 			throw new Error("expected clone to reject");
 		} catch (error) {
-			expect(error).toMatchObject({ name: "VcsError" });
-			const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-			expect(["Canceled", "Cli", "CliTimeout"]).toContain(String(code));
+			expect(error).toMatchObject({ name: "VcsError", code: "Canceled" });
 			expect(performance.now() - started).toBeLessThan(2_000);
 		}
 	});
